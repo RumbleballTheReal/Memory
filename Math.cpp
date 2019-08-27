@@ -1,5 +1,6 @@
 FRotator UMathExtensionLibrary_BP::GridSnap_Rotation(const FRotator& rotator, const float gridDeg)
 {
+	if (FMath::IsNearlyZero(gridDeg)) return rotator;
 	// We assume grid size values of max 90
 
 	const float gridRad = FMath::DegreesToRadians(gridDeg);

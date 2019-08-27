@@ -1,90 +1,133 @@
-FRotator GridSnap_Rotation(const FRotator& rotator, const float gridSize)
+FRotator UMathExtensionLibrary_BP::GridSnap_Rotation(const FRotator& rotator, const float gridDeg)
 {
-    // We assume grid size values of max 90
+	// We assume grid size values of max 90
 
-    const float gridRadians = FMath::DegreesToRadians(gridSize);
-    FQuat quat = rotator.Quaternion();
+	const float gridRad = FMath::DegreesToRadians(gridDeg);
+	FQuat quat = rotator.Quaternion();
 
-    auto EnsureNonZero = [](const FVector& original, FVector& target) {
-        if (target.IsNearlyZero())
-        {
-            TArray<float> maxHelper = { FMath::Abs(original.X), FMath::Abs(original.Y), FMath::Abs(original.Z) };
-            int32 maxIndex = INDEX_NONE;
-            FMath::Max(maxHelper, &maxIndex);
-            target[maxIndex] = FMath::Sign(original[maxIndex]) * 1.f;
-        }
-    };
+	FVector forward = quat.GetForwardVector();
+	FVector right = quat.GetRightVector();
 
-    TArray<FVector> directions = { quat.GetForwardVector(), quat.GetRightVector(), quat.GetUpVector() };
-
-    TArray<FVector> asin;
-    asin.Reserve(3);
-    for (const FVector& vec : directions)
-    {
-        asin.Add(FVector(
-                     FMath::Asin(vec.X)
-                     , FMath::Asin(vec.Y)
-                     , FMath::Asin(vec.Z)
-                 ));
-    }
-
-    TArray<FVector> snapped;
-    snapped.Reserve(3);
-    for (const FVector& vec : asin)
-    {
-        snapped.Add(FVector(
-                        FMath::GridSnap(vec.X, gridRadians)
-                        , FMath::GridSnap(vec.Y, gridRadians)
-                        , FMath::GridSnap(vec.Z, gridRadians)
-                    ));
-    }
-
-    TArray<float> snapDeltaSum;
-    snapDeltaSum.Reserve(3);
-    for (int32 i = 0; i < 3; ++i)
-    {
-        FVector tempAbs = (snapped[i] - asin[i]).GetAbs();
-        snapDeltaSum.Add(tempAbs.X + tempAbs.Y + tempAbs.Z);
-    }
-
-    TArray<int32> indexMin;
-    indexMin.Reserve(3);
-    for (int32 i = 0; i<3; ++i)
-    {
-        int32 min = INDEX_NONE;
-        FMath::Min(snapDeltaSum, &min);
-        indexMin.Add(min);
-        snapDeltaSum[min] = BIG_NUMBER; // Don't return that field again.
-    }
-
-	// Snap the 2 vectors with the lowest deltaSum as those are closest to their snap position.
-    TArray<FVector> results;
-    results.SetNum(3);
-    for (int32 i = 0; i<2; ++i)
-    {
-		int32 index = indexMin[i];
-        results[index] = FVector(
-                             FMath::Sin(snapped[index].X)
-                             , FMath::Sin(snapped[index].Y)
-                             , FMath::Sin(snapped[index].Z)
-                         );
-		EnsureNonZero(directions[index], results[index]);
-		results[index].Normalize();
-    }
-
-	// Calculate the last vector through cross product
-	if(indexMin[2] == 0)
+	// Forward
+	// To get the forward vector, we snap the forward vector of the quaternion
+	// to a linear representation of the rotation.
+	FVector forwardResult;
 	{
-		results[0] = results[1] ^ results[2];
-	}
-	else if (indexMin[2] == 1)
-	{
-		results[1] = results[2] ^ results[0];
-	}
-	else if (indexMin[2] == 2)
-	{
-		results[2] = results[0] ^ results[1];
+		// Bring the vector into linear space
+		forwardResult = FVector(
+			FMath::Asin(forward.X)
+			, FMath::Asin(forward.Y)
+			, FMath::Asin(forward.Z)
+		);
+
+		// Snap in linear space
+		forwardResult = FVector(
+			FMath::GridSnap(forwardResult.X, gridRad)
+			, FMath::GridSnap(forwardResult.Y, gridRad)
+			, FMath::GridSnap(forwardResult.Z, gridRad)
+		);
+
+		// Back to sine space
+		forwardResult = FVector(
+			FMath::Sin(forwardResult.X)
+			, FMath::Sin(forwardResult.Y)
+			, FMath::Sin(forwardResult.Z)
+		);
+
+		// Ensure our forward vector is not Zero
+		if(forwardResult.IsNearlyZero())
+		{
+		   TArray<float> maxHelper = { FMath::Abs(forward.X), FMath::Abs(forward.Y), FMath::Abs(forward.Z) };
+		   int32 maxIndex = INDEX_NONE;
+		   FMath::Max(maxHelper, &maxIndex);
+		   forwardResult[maxIndex] = FMath::Sign(forward[maxIndex]);
+		}
+
+		// Snapping each component of the vector to the grid does not yet place the vector
+		// in the rotation grid (when z != 0). We need to make a correction that also normalizes
+		// the vector again.
+		// E.g 45deg rotated around the y axis and then 45deg rotated around the z axis.
+		// Cause of the component snapping, all components of the vector are now 0.707 (sin space).
+		// Only the z component is valid to have 0.707, X and Y must be adjusted.
+		// The proper result must be FVector(0.5, 0.5, 0.707)
+		float sizeXYTarget = FMath::Sqrt(1 - FMath::Square(forwardResult.Z));
+		FVector2D vec2D = FVector2D(forwardResult);
+		float size2d = vec2D.Size();
+		if (FMath::IsNearlyZero(size2d))
+		{
+			vec2D *= 0;
+		}
+		else
+		{
+			vec2D *= sizeXYTarget / size2d;
+		}
+
+		forwardResult.Normalize();
 	}
 
-    return UKismetMathLibrary::MakeRotationFromAxes(results[0], results[1], results[2]);
+	// Right
+	// To get the right vector we rotate in grid distance around the forward vector
+	// and take the vector that is closest to the original right vector.
+	FVector rightResult;
+	{
+		FVector rightTemp;
+		if (forwardResult.Equals(FVector(0.f, 0.f, 1.f)))
+		{
+			rightTemp = FVector(0.f, 1.f, 0.f);
+		}
+		else if (forwardResult.Equals(FVector(0.f, 0.f, -1.f)))
+		{
+			rightTemp = FVector(0.f, -1.f, 0.f);
+		}
+		else
+		{
+			rightTemp = FVector(0.f, 0.f, 1.f) ^ forwardResult;
+			rightTemp.Normalize();
+		}
+		FVector bestMatch = rightTemp;
+		float distClosest = FVector::DistSquared(rightTemp, right);
+
+		bool bInversed = false;
+		bool bWasCloser = false;
+		int32 rotMultiplier = 0;
+		while (true)
+		{
+			rotMultiplier = rotMultiplier + (bInversed ? -1 : 1);
+			FVector rightRotated = rightTemp.RotateAngleAxis(gridDeg * rotMultiplier, forwardResult);
+			float dist = FVector::DistSquared(rightRotated, right);
+			if (dist < distClosest || FMath::IsNearlyEqual(dist, distClosest, KINDA_SMALL_NUMBER))
+			{
+				bWasCloser = true;
+				distClosest = dist;
+				bestMatch = rightRotated;
+			}
+			else if (dist > distClosest)
+			{
+				// Getting further away from our target
+				if (!bInversed)
+				{
+					// First time, inverse rotation
+					bInversed = true;
+				}
+				else if(bWasCloser)
+				{
+					// Have been closest possible already and getting further away again: closest possible found
+					break;
+				}
+			}
+		}
+
+		rightResult = bestMatch;
+	}
+
+	// Up
+	FVector upResult;
+	{
+		upResult = forwardResult ^ rightResult;
+		upResult.Normalize();
+	}
+
+	FRotator out = UKismetMathLibrary::MakeRotationFromAxes(forwardResult, rightResult, upResult);
+	ensure(!out.ContainsNaN());
+	return out;
 }
